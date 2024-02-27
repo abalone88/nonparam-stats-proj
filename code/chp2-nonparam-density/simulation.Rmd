@@ -1,0 +1,199 @@
+---
+title: "Simulation Study for Bandwidth Selectors"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(MASS)
+library(reshape2) 
+library(tidyverse)
+library(ks)
+library(rlcv)
+```
+
+```{r}
+library(ggplot2)
+
+# Function to plot KDE for a given sample size
+plot_kde_for_sample_size <- function(sample_size) {
+  # Simulate data for a mixture of two Gaussian distributions
+  set.seed(123)
+  data1 <- rnorm(sample_size / 2, mean = 0, sd = 1)
+  data2 <- rnorm(sample_size / 2, mean = 5, sd = 2)
+  data <- c(data1, data2)
+  
+  # Bandwidth estimation
+  bw_rot <- bw.nrd0(data) # Rule of Thumb Method
+  bw_dpi <- bw.nrd(data)  # Direct Plug-In Method
+  bw_ste <- bw.SJ(data)   # Solve-the-Equation (STE) Method
+  bw_ucv <- bw.ucv(data)  # Maximal Smoothing (UCV)
+  
+  # Generate a sequence of points for plotting
+  x_seq <- seq(min(data), max(data), length.out = 1000)
+  
+  # Calculate KDEs for the sequence
+  kde_list <- lapply(c(bw_rot, bw_dpi, bw_ste, bw_ucv), function(bw) {
+    density(data, bw = bw, from = min(x_seq), to = max(x_seq), n = length(x_seq))
+  })
+  
+  names(kde_list) <- c("rot", "dpi", "ste", "ucv")
+  
+  # True density for the sequence
+  true_density_vals <- 0.5 * dnorm(x_seq, mean = 0, sd = 1) + 0.5 * dnorm(x_seq, mean = 5, sd = 2)
+  
+  # Prepare data for ggplot
+  df <- data.frame(x = x_seq, true_density = true_density_vals)
+  
+  for (name in names(kde_list)) {
+    df[[name]] <- kde_list[[name]]$y
+  }
+  
+  df_melted <- melt(df, id.vars = "x")
+  
+  # Plotting
+  p <- ggplot(df_melted, aes(x = x, y = value, color = variable)) +
+    geom_line() +
+    labs(title = paste("KDE vs. True Density for Sample Size", sample_size),
+         x = "Value", y = "Density") +
+    scale_color_manual(values = c("rot" = "black", "dpi" = "red", "ste" = "blue", "optimal" = "purple", "ucv" = "orange", "true_density" = "green")) +
+    theme_minimal()
+  
+  print(p)
+}
+
+# Call the function with different sample sizes
+sample_sizes <- c(100, 500, 1000)
+lapply(sample_sizes, plot_kde_for_sample_size)
+
+
+
+
+```
+```{r warning=FALSE}
+# numerical integration to estimate MISE
+calculate_mise <- function(true_density, estimated_density, x_values) {
+  integrate(splinefun(x_values, (estimated_density - true_density)^2), min(x_values), max(x_values))
+}
+
+# True density
+bimodal_gaussian <- function(x){
+    0.5 * dnorm(x, mean = 0, sd = 1) + 0.5 * dnorm(x, mean = 5, sd = 2)
+}
+skewed_lognormal <- function(x){
+    dlnorm(x, meanlog = 0, sdlog = 1)
+}
+
+# Simulation function to calculate MISE for different bandwidth selection methods
+simulate_mise <- function(sample_size, num_simulations, true_density) {
+  mise <- data.frame(ROT = double(num_simulations), DPI = double(num_simulations),
+                     STE = double(num_simulations), UCV = double(num_simulations), LCV = double(num_simulations))
+                     #LSCV = double(num_simulations)) , 
+
+  for (i in 1:num_simulations) {
+    if (true_density == "gaussian") {
+      data <- c(rnorm(sample_size / 2, mean = 0, sd = 1), rnorm(sample_size / 2, mean = 5, sd = 2))
+    } else if (true_density == "log_normal") {
+      data <- c(rlnorm(sample_size, meanlog = 0, sd = 1))
+    }
+    
+    # Estimating densities using different bandwidth selectors
+    bw_rot <- bw.nrd0(data) # normal
+    bw_dpi <- bw.SJ(data, method = "dpi")  # direct plug-in
+    bw_ste <- bw.SJ(data, method = "ste")  # solve the equation
+    bw_ucv <- bw.ucv(data)  # unbiased crossed validation
+    #bw_lscv <- as.vector(ks::Hlscv(data))[1]
+    bw_lcv <- rlcv::lcv(data)[[1]] # likelihood cross validation
+    
+    x_values <- seq(min(data), max(data), length.out = 1000)
+    
+    # Calculating the true density values
+    true_dens_values <- true_density(x_values)
+    
+    # KDE for each bandwidth method
+    kde_rot <- density(data, bw = bw_rot, from = min(x_values), to = max(x_values), n = length(x_values))
+    kde_dpi <- density(data, bw = bw_dpi, from = min(x_values), to = max(x_values), n = length(x_values))
+    kde_ste <- density(data, bw = bw_ste, from = min(x_values), to = max(x_values), n = length(x_values))
+    kde_ucv <- density(data, bw = bw_ucv, from = min(x_values), to = max(x_values), n = length(x_values))
+    #kde_lscv <- density(data, bw = bw_lscv, from = min(x_values), to = max(x_values), n = length(x_values))
+    kde_lcv <- density(data, bw = bw_lcv, from = min(x_values), to = max(x_values), n = length(x_values))
+
+    
+    # Calculating MISE for each method
+    mise$ROT[i] <- calculate_mise(true_dens_values, kde_rot$y, x_values)
+    mise$DPI[i] <- calculate_mise(true_dens_values, kde_dpi$y, x_values)
+    mise$STE[i] <- calculate_mise(true_dens_values, kde_ste$y, x_values)
+    mise$UCV[i] <- calculate_mise(true_dens_values, kde_ucv$y, x_values)
+    #mise$LSCV[i] <- calculate_mise(true_dens_values, kde_lscv$y, x_values)
+    mise$LCV[i] <- calculate_mise(true_dens_values, kde_lcv$y, x_values)
+  }
+  
+  return(mise)
+}
+
+```
+
+```{r}
+do_simulation <- function(sample_sizes, num_simulations, true_density){
+  mise_list <- lapply(sample_sizes, function(n) {
+                                      simulate_mise(n, num_simulations, true_density)})
+  
+  names(mise_list) <- paste("n=", sample_sizes, sep="")
+  
+  mise_list <- lapply(seq_along(mise_list), function(i) {
+  df <- mise_list[[i]]
+  df$n <- rep(sample_sizes[i], nrow(df))
+  return(df)
+  })
+  
+  mise_data <- do.call(rbind, mise_list)
+
+  for (col in names(mise_data)) {
+    if (is.list(mise_data[[col]])) {
+      mise_data[[col]] <- unlist(mise_data[[col]])
+    }
+  }
+  
+  mise_data_long <- melt(mise_data, id.vars = "n")
+  
+  mise_data_long$n <- factor(mise_data_long$n)
+  levels(mise_data_long$n) <- paste0("n=", levels(mise_data_long$n))
+  
+  # Plotting MISE boxplots for different sample sizes
+  p <- ggplot(mise_data_long, aes(x = variable, y = value)) +
+        geom_boxplot() +
+        labs(x = "Bandwidth Selection Method", 
+             y = "MISE") +
+        facet_wrap(~ n, scales = "free") +
+        theme(legend.title = element_blank(),
+              panel.grid.major = element_blank(), 
+              panel.grid.minor = element_blank(),
+              panel.background = element_blank(), # Optionally remove panel background
+            axis.line = element_line(colour = "black")) # Optionally add axis lines
+  
+  return(list(data = mise_data_long, plot = p))
+}
+```
+
+```{r, warning=FALSE}
+sample_sizes <- c(10, 50, 100, 500)
+num_simulations <- 100
+
+result_mixture_Gaussian <- do_simulation(sample_sizes, num_simulations, true_density="gaussian")
+result_log_normal <- do_simulation(sample_sizes, num_simulations, true_density="log_normal")
+
+```
+
+```{r, warning=FALSE}
+result_mixture_Gaussian$plot
+ggsave("simulation_gaussian_mise.png")
+
+result_log_normal$plot
+ggsave("simulation_log_normal_mise.png")
+
+
+
+```
+
